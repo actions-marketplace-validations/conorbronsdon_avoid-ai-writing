@@ -2,7 +2,7 @@
 
 This repository contains a native ChatGPT and Codex plugin package while keeping the existing Claude plugin and the canonical `SKILL.md` and `references/patterns.md`.
 
-The package is published as [Avoid AI Writing](https://chatgpt.com/plugins/plugins_6a9b77b18b8881918efa9c1255868164) in the OpenAI Plugins Directory (version 3.29.0, approved and published 2026-09-04).
+The [Avoid AI Writing directory listing](https://chatgpt.com/plugins/plugins_6a9b77b18b8881918efa9c1255868164) showed version 3.29.0 on 2026-09-23; that submission was approved and published on 2026-09-04. The version in this repository may be newer than the published plugin. Check the listing for the version currently available to install.
 
 ## Architecture
 
@@ -27,15 +27,15 @@ The network uses typed relationships rather than loose prose references:
 - `ROUTE` selects a primary owner.
 - `FEED` passes evidence into another requested stage.
 - `VERIFY` sends before/after content to the preservation gate.
-- `REPAIR` returns a failed preservation scope to the correct owner once.
+- `REPAIR` returns a failed preservation scope to the correct owner once when the shared requested editing-pass budget has room.
 - `RECHECK` permits one bounded residual audit when requested.
 - `ESCALATE` sends interpretation questions to the terminal reviewer.
 
 Conditional guards live in `skill-graph.json` `guards` and the handoff envelope; they constrain semantics without adding a graph edge or changing the primary owner.
 
-Cross-stage state follows `skills/avoid-ai-writing-router/references/handoff-contract.md`. The envelope carries context mode, voice, protected constraints, execution evidence, detector summary, verification state, risk flags, and pass limits without making each Skill infer them again.
+Cross-stage state follows `skills/avoid-ai-writing-router/references/handoff-contract.md`. The envelope carries requested scope, explicit user corrections, the canonical context profile separately from detector mode, voice, protected constraints, execution evidence, detector summary, verification state, risk flags, and pass limits without making each Skill infer them again.
 
-Terminal Skills have no outgoing Skill edges. Every permitted graph cycle must pass through an edge with `max_reentries: 1`, which keeps repair and residual-check loops bounded.
+Terminal Skills have no outgoing Skill edges. Every permitted graph cycle must pass through an edge with `max_reentries: 1`, and corrective edits and repairs share the requested editing-pass budget, capped at two.
 
 ## Agency review lenses
 

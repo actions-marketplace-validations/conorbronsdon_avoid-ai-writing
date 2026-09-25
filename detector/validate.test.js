@@ -89,6 +89,32 @@ test('an indented fenced-code edit still fires', () => {
   assert.ok(codes(r).includes('code-block-modified'), formatResult(r));
 });
 
+test('a prose line opening with a triple-backtick inline span is not a fence', () => {
+  // CommonMark: a backtick fence's info string cannot contain a backtick, so
+  // this line is a paragraph. Treated as an opener it never closes, the rest
+  // of the document becomes one code block, and an ordinary prose edit below
+  // it reports as code-block-modified.
+  const before = '# Setup\n\n```npm test``` runs the suite.\n\nOrdinary prose alpha.';
+  const after = '# Setup\n\n```npm test``` runs the suite.\n\nOrdinary prose beta.';
+  const r = validate(before, after, { skipResidual: true });
+  assert.equal(r.ok, true, formatResult(r));
+});
+
+test('a real fence after a triple-backtick inline span still fires', () => {
+  const before = '```npm test``` runs the suite.\n\n```js\nconst x = 1;\n```\n\nOrdinary prose.';
+  const after = '```npm test``` runs the suite.\n\n```js\nconst x = 2;\n```\n\nOrdinary prose.';
+  const r = validate(before, after, { skipResidual: true });
+  assert.ok(codes(r).includes('code-block-modified'), formatResult(r));
+});
+
+test('a tilde fence keeps backticks in its info string → error', () => {
+  // The backtick restriction applies to backtick fences only.
+  const before = '~~~ `md`\nSECRET CODE A\n~~~\n\nOrdinary prose.';
+  const after = '~~~ `md`\nSECRET CODE B\n~~~\n\nOrdinary prose.';
+  const r = validate(before, after, { skipResidual: true });
+  assert.ok(codes(r).includes('code-block-modified'), formatResult(r));
+});
+
 test('blockquote reworded → error', () => {
   const before = 'He said:\n\n> The system is slow and it is getting slower.\n> We need to fix it.\n\nThat is the claim.';
   const after = 'He said:\n\n> The system is slow and getting slower.\n> We need to fix it.\n\nThat is the claim.';
@@ -101,6 +127,20 @@ test('table cell content changed → error', () => {
   const after = '| Repo | Stars |\n|---|---|\n| patina | 280 |\n';
   const r = validate(before, after, { skipResidual: true });
   assert.ok(codes(r).includes('table-modified'));
+});
+
+test('table without outer pipes changed → error', () => {
+  const before = 'Intro.\n\nRepo | Stars\n--- | ---\npatina | 278\n\nOutro.';
+  const after = 'Intro.\n\nRepo | Stars\n--- | ---\npatina | 280\n\nOutro.';
+  const r = validate(before, after, { skipResidual: true });
+  assert.ok(codes(r).includes('table-modified'), formatResult(r));
+});
+
+test('single-column pipe table changed → error', () => {
+  const before = '| Repo |\n| --- |\n| patina |\n';
+  const after = '| Repo |\n| --- |\n| changed |\n';
+  const r = validate(before, after, { skipResidual: true });
+  assert.ok(codes(r).includes('table-modified'), formatResult(r));
 });
 
 test('inline code dropped → error', () => {
@@ -297,6 +337,82 @@ test('removing an emoji from a heading → warning, not error', () => {
 test('re-aligning table padding → no error', () => {
   const before = '| Repo | Stars |\n|---|---|\n| patina | 278 |\n';
   const after = '| Repo   | Stars |\n| ------ | ----- |\n| patina | 278   |\n';
+  const r = validate(before, after, { skipResidual: true });
+  assert.equal(r.ok, true, formatResult(r));
+});
+
+test('re-aligning a table without outer pipes → no error', () => {
+  const before = 'Repo | Stars\n---|---\npatina|278\n';
+  const after = 'Repo   | Stars\n------ | -----\npatina | 278\n';
+  const r = validate(before, after, { skipResidual: true });
+  assert.equal(r.ok, true, formatResult(r));
+});
+
+test('compact GFM delimiters protect cells and allow delimiter padding changes', () => {
+  for (const delimiter of ['- | -', '-- | --', ':-: | --:']) {
+    for (const outer of [false, true]) {
+      const row = (text) => outer ? `| ${text} |` : text;
+      const before = [row('Name | Value'), row(delimiter), row('alpha | beta')].join('\n');
+      const changed = validate(before, before.replace('alpha', 'changed'), { skipResidual: true });
+      assert.ok(codes(changed).includes('table-modified'), formatResult(changed));
+      const padded = before.replace(delimiter, delimiter.replace(/-+/g, '-----'));
+      const same = validate(before, padded, { skipResidual: true });
+      assert.equal(same.ok, true, formatResult(same));
+    }
+  }
+});
+
+test('colon-only cells do not form a table delimiter', () => {
+  const before = 'Name | Value\n: | ::\nalpha | beta';
+  const r = validate(before, before.replace('alpha', 'changed'), { skipResidual: true });
+  assert.equal(r.ok, true, formatResult(r));
+});
+
+test('hyphens in table content remain significant', () => {
+  const before = 'Name | Value\n--- | ---\nfoo--bar | one\n';
+  const after = 'Name | Value\n--- | ---\nfoo-bar | one\n';
+  const r = validate(before, after, { skipResidual: true });
+  assert.ok(codes(r).includes('table-modified'), formatResult(r));
+});
+
+test('a mismatched header and delimiter shape is not a table', () => {
+  const before = 'one | two\n--- | --- | ---\n';
+  const after = 'changed | two\n--- | --- | ---\n';
+  const r = validate(before, after, { skipResidual: true });
+  assert.equal(r.ok, true, formatResult(r));
+});
+
+test('top-level indented code is not a table', () => {
+  const before = '    one | two\n    --- | ---\n    alpha | beta\n';
+  const after = '    changed | two\n    --- | ---\n    alpha | beta\n';
+  const r = validate(before, after, { skipResidual: true });
+  assert.ok(!codes(r).includes('table-modified'), formatResult(r));
+});
+
+test('three-space-indented tables remain protected', () => {
+  const before = '   one | two\n   --- | ---\n   alpha | beta\n';
+  const after = '   changed | two\n   --- | ---\n   alpha | beta\n';
+  const r = validate(before, after, { skipResidual: true });
+  assert.ok(codes(r).includes('table-modified'), formatResult(r));
+});
+
+test('escaped pipes do not add table cells', () => {
+  const before = 'one \\| literal | two\n--- | ---\nalpha | beta\n';
+  const after = 'changed \\| literal | two\n--- | ---\nalpha | beta\n';
+  const r = validate(before, after, { skipResidual: true });
+  assert.ok(codes(r).includes('table-modified'), formatResult(r));
+});
+
+test('prose containing a bare pipe is not treated as a table', () => {
+  const before = 'Use a | b in the shell.';
+  const after = 'Use c | d in the shell.';
+  const r = validate(before, after, { skipResidual: true });
+  assert.equal(r.ok, true, formatResult(r));
+});
+
+test('pipe-delimited lines without a delimiter row are not a table', () => {
+  const before = 'one | two\nthree | four\n';
+  const after = 'one | changed\nthree | four\n';
   const r = validate(before, after, { skipResidual: true });
   assert.equal(r.ok, true, formatResult(r));
 });

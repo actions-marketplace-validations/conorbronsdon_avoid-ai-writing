@@ -8,9 +8,25 @@ All notable changes to this project are documented here.
 
 ### Added
 
-- Add machine-readable `--json` output to `avoid-ai-writing-gate` and expose `pass`, `total-findings`, and `failed-files` step outputs in the GitHub Action (#252).
+- The bundled `ai-writing-detector` script accepts `--source-mode <plain|rendered-markdown>`, so the published plugin can reach rendered-Markdown scoring instead of flagging YAML frontmatter as the author's prose. It also accepts the `marketing` and `personal` contexts the root CLI and the detector already support, which it previously rejected. Blank input reports the selected context and source mode instead of an empty `stats` object, matching the root CLI. A bad argument now prints the usage message and exits 2 instead of throwing an uncaught stack trace (#244).
 
 ### Changed
+
+- Performed-insight phrases now cover staged discoveries: a judgment framed as a twist the writer found ("the recording turned out to be the least interesting part", "the real story was"). The detector keeps the superlative-plus-insight-noun form and reveal-style "real story" continuations narrow, so literal uses such as "turned out to be the most expensive option" and "the real story was covered" stay clean. Nested emotional-flatline wording and sentence-initial "Turns out" count once when contained in a staged discovery. In short social copy, one staged discovery carrying the payoff is enough to fix. The fabricated-speaker-perspective guardrail now also covers drafting new copy in someone else's voice. No new category.
+- Cover two phrasings flagged in #325 as judgment-only examples: cold-outreach flattery asks ("I'd value your take on this") under sycophantic tone, and the teaser form of the crowd contrast ("the call most leaders still won't make"). No detector change and no new category.
+
+## [3.36.0] — 2026-09-23
+
+### Added
+
+- Add machine-readable `--json` output to `avoid-ai-writing-gate` and expose `pass`, `total-findings`, and `failed-files` step outputs in the GitHub Action (#252).
+- Note in the README that the pinned `v3.35.0` Action example predates the step outputs and `--json`, and cover the gate's `--json` operational-error paths and the Action's output writer with executed tests.
+
+### Changed
+
+- Return one final rewrite after audit, correction, and available verification instead of publishing a first-pass draft and a superseding copy. Corrective edits and preservation repairs now share the two-pass limit; `--iterate 1|2`, clean no-ops, protected or intentional residuals, edit-in-place reporting, and unavailable-check status remain explicit (#203).
+
+- Define one editing contract for rewrite and file-edit decisions. Cleanup now separates candidate matches, justified findings, and authorized edits; preserves source-supported facts, attribution, negation, uncertainty, technical terms, intentional rhetoric, protected content, and established voice; allows explicitly requested structure or register changes without invented evidence or experience; respects context skips before voice targets; leaves clean input unchanged when no separate transformation is requested; and no longer requires confirmation solely because a clearly scoped file is large (#202).
 
 - Link the GitHub Marketplace listing from the Action instructions and pin the
   example workflow to the released `v3.35.0` tag.
@@ -18,12 +34,16 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Require explicit skill names matching their directories and reject duplicate frontmatter keys, including mixed quoted/unquoted keys, while retaining required names in every generated distribution (#259).
+- Accept `--context marketing` and `--context personal` in the `avoid-ai-writing` scoring CLI, which previously rejected them with exit 2 even though the engine and the gate CLI support all four contexts. `--help` now lists the same values in both binaries (#207).
+- Detect unsegmented-script documents (Chinese/Japanese: no inter-word spaces) before the word gate and label them `Unsupported script` instead of `Too short`, with the reason and CJK character count in `stats`. The check recognizes the full Unicode Han and kana scripts (including supplementary-plane and halfwidth forms) and declines only when CJK characters dominate the non-whitespace text, so newline-wrapped lines cannot bypass it and short English documents with an incidental place name stay scorable. The gate CLI now exits 2 on such files — matching the documented unscannable-input exit code — instead of passing silently at every threshold, and the repository self-scan reports declined documents instead of scoring them as clean while keeping raw and exemption-aware declines distinct (#241).
 - Align false-positive preprocessing with CommonMark for backtick fence info strings and multiline setext headings, preserve unique normalized units as modified when only whitespace boundaries move their source spans, reject Windows OpenCode command shims with an actionable native-binary error, and recognize first-person `I` inside otherwise targeted Title Case headings (#314).
 - Restrict Title Case header word separators and trailing whitespace to horizontal whitespace, so a match can never run past one physical line. `\s` also ate newlines, which let two unrelated lines or a blank-line-separated fragment combine into a single heading match that neither line independently satisfied (#291).
 - Report the underlying OpenCode export launch error instead of a secondary `stderr.trim()` exception during rewrite evaluation.
 - Preserve non-tracking query parameters when removing AI-referrer parameters from URLs during rewrite validation (#210). Removing a tracker that sits directly before bold markers, a dash, or an ellipsis no longer reports the URL as altered.
 - Replace four superlinear Markdown scans reachable through the detector API with bounded or forward-only parsing. Validate corpus cache IDs, stage and retry cache replacements, isolate CLI-test files in private temporary directories, and require push-triggered releases to prove the package version changed.
 - Replace the preservation validator's fenced-code regex with a line scanner that tracks the opening fence marker and run length, so a fence closes only on the same marker at equal or greater length per CommonMark. A `~~~` line inside a ``` block (the normal way to document Markdown fences) is content, and a three-backtick line inside a four-backtick fence no longer closes it. The same scanner replaces the marker-agnostic matcher in `scripts/self-scan.js` (#236).
+- Stop the preservation validator's fence scanner from opening a fence on a backtick line whose info string contains a backtick, which CommonMark forbids. A prose line that began with a triple-backtick inline span opened a fence that ran to end of document, so every later prose edit reported `code-block-modified`. `scripts/self-scan.js` had the same gap and exempted the rest of the document from its scan.
 
 ## [3.35.0] — 2026-09-13
 
@@ -41,6 +61,7 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Recognize GFM tables without outer pipes in preservation validation and self-scan exemptions, including compact one- and two-hyphen delimiter cells, while requiring a delimiter row so prose containing a bare pipe remains editable (#209).
 - Suppress eight technical-legitimate vocabulary terms (`robust`, `comprehensive`, `seamless`, `ecosystem`, `leverage`, `facilitate`, `underpin`, `streamline`) when analyzing text under `--context technical` mode (#237).
 
 - Keep mid-paragraph years and other ordered markers above one in prose during false-positive measurement; expose blank-separated continuation merges and distinct measurement/preprocessor fingerprints; and pair attached headings with their unique legacy body span in comparison output without changing source spans or unit IDs (#293).

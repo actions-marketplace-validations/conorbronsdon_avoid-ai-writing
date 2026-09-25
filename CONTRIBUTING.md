@@ -34,6 +34,7 @@ newcomer PRs. Please leave `good first issue`s for new contributors.
 | `detector/patterns.js` | The deterministic engine — the executable subset of the rules. |
 | `detector/CATEGORIES.md` | The map between references/patterns.md rules and detector `type`s. Keep it current. |
 | `README.md` | The pitch and the numbered prose-pattern list. |
+| [`GLOSSARY.md`](GLOSSARY.md) | One-line definitions of the project's terms, each linked to its canonical source. |
 | `cursor-rules/`, `plugins/` | Editor and tool integrations. |
 
 ## Adding or changing a rule
@@ -45,6 +46,12 @@ First decide which kind of rule it is:
   add a row to `detector/CATEGORIES.md`. Cover it with a fixture in
   `detector/patterns.test.js` (both a true positive and a case that must *not*
   fire).
+  The category contract in `detector/categories.test.js` requires each type
+  to appear by name in that fixture file. The phrase-level gaps listed in its
+  `LEGACY_UNCOVERED_TYPES` are explicit exceptions while #213 and the related
+  false-positive fixes are open; remove an entry when its fixtures land, and
+  never add one. The name check prevents omissions but does not replace
+  assertions that the intended behavior fires and stays clean.
 - **Judgment-only** (needs reading for meaning — tone, structure, name-dropping)
   → add it to `references/patterns.md` prose and list it under "Skill-only" in
   `detector/CATEGORIES.md`. There is no detector type for these.
@@ -84,6 +91,32 @@ it. These claims get checked, and some turn out wrong or more nuanced than they
 first seem (smart quotes, for instance, are a typing-time default on macOS and in
 Word, not a publication-step artifact). A claim with a citation can be verified;
 an asserted one can't. Put the links in the PR description or inline in the rule.
+
+## Language adaptations
+
+This skill and its deterministic detector are calibrated for English. Start a
+non-English adaptation in a separately maintained fork or repository, with its
+own language-specific rules and release process. We can discuss bringing a
+well-maintained adaptation into this repo later if its maintainers want shared
+ownership and we can sustain its tests and review. A translated word list alone
+does not establish that the rules work in another language.
+
+Identify the target language, dialect, audience, and registers. Rebuild lexical
+tiers from native-language writing rather than translating English entries;
+check which structural rules transfer and add language-specific exceptions.
+Show positive and must-not-fire examples across relevant registers, especially
+ordinary human writing that a rule might flag. Describe your sample provenance,
+what was measured, and what remains editorial judgment. Do not publish
+authorship or false-positive claims without evidence for that language and
+register. State known limitations, including dialect and formal-register cases.
+Keep the upstream license and attribution when adapting this work.
+
+To request a link in the [community section](README.md#community--multilingual),
+open an issue with the repository URL, maintainer, language and dialect, a short
+description of the native-language changes, evidence and limitations, and where
+users should report problems. We review links for a clear scope, an accountable
+maintainer, and honest claims. A link helps readers discover your adaptation;
+it does not mean this repository maintains it or certifies its accuracy.
 
 ## Style guides and licensing
 

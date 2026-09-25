@@ -876,6 +876,16 @@ const AIDetector = (() => {
     /\b(?:that|this)(?:['\u2019]s|\s+(?:is|was))\s+why\s+[^.!?\n]{0,60}\s+mattered\b/gi,
   ];
 
+  const STAGED_DISCOVERY = [
+    // Staged discovery: a judgment framed as a twist the writer found ("the recording
+    // turned out to be the least interesting part"). Superlative + insight noun keeps
+    // ordinary "turned out to be the most expensive option" clean.
+    /\b(?:turned|turns|turning)\s+out\s+to\s+be\s+the\s+(?:least|most)\s+(?:interesting|important|surprising|revealing|valuable|useful)\s+(?:part|thing|piece|bit)\b/gi,
+    // Require a reveal-style continuation; "the real story was covered by..."
+    // describes a literal story and is not a staged discovery.
+    /\bthe\s+real\s+story\s+(?:here\s+)?(?:is|was)\b(?=\s+(?:the|that|how|why|what)\b)/gi,
+  ];
+
   // ─── Negation chains ───────────────────────────────────────────────
   // "No fluff, no filler, no jargon" / "It didn't ask, didn't wait" /
   // "Don't call it X. Call it Y." Precision guards, in order: the
@@ -1740,6 +1750,31 @@ const AIDetector = (() => {
     sourceMap = norm.sourceMap;
 
     const wordCount = countWords(text);
+    // Unsegmented-script check (GH-241): Chinese and Japanese carry no
+    // inter-word spaces, so word segmentation cannot measure them — a long
+    // document counts as one \S+ run and would misreport as "Too short",
+    // while newline-wrapped lines each count as a word and would score
+    // without segmentation. The check therefore runs before the word gate
+    // and declines only when CJK characters dominate the non-whitespace
+    // text, so short English documents with an incidental place name or
+    // single Han character stay scorable. Unicode script properties cover
+    // the complete Han, Hiragana, and Katakana repertoires (including
+    // supplementary-plane and halfwidth forms); Hangul is space-separated
+    // and segments fine, so it is excluded. Both counts use Unicode mode so
+    // supplementary characters count as one code point rather than two UTF-16
+    // code units.
+    const cjkChars = (text.match(/[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}]/gu) || []).length;
+    const nonSpaceChars = (text.match(/\S/gu) || []).length;
+    if (cjkChars > 0 && cjkChars * 2 >= nonSpaceChars) {
+      return {
+        ...buildV2Defaults('UNSCORED', 'low'),
+        score: 0,
+        label: 'Unsupported script',
+        issues: [],
+        stats: { wordCount, cjkChars, reason: 'unsegmented-script document: no inter-word spaces to count', contextMode, contextModeFallback, sourceMode, sourceModeFallback, maskedFrontmatter, maskedHtmlComments },
+        unsupportedScript: true,
+      };
+    }
     if (wordCount < 10) {
       return {
         ...buildV2Defaults('UNSCORED', 'low'),
@@ -1886,6 +1921,8 @@ const AIDetector = (() => {
     issues.push(...matchPatterns(text, REAL_ACTUAL_INFLATION, 'real-actual-inflation', 'medium'));
     issues.push(...matchPatterns(text, SOCIAL_CTA_CLOSER, 'social-cta-closer', 'high'));
     issues.push(...matchPatterns(text, PERFORMED_INSIGHT, 'performed-insight', 'medium'));
+    const stagedDiscoveryIssues = matchPatterns(text, STAGED_DISCOVERY, 'performed-insight', 'medium');
+    issues.push(...stagedDiscoveryIssues);
     issues.push(...matchPatterns(text, NEGATION_CHAIN, 'negation-chain', 'high'));
     issues.push(...matchPatterns(text, DEV_BLOG_BOILERPLATE, 'dev-blog-boilerplate', 'medium'));
     issues.push(...findUnnecessaryHyphenation(text));
@@ -2374,17 +2411,20 @@ const AIDetector = (() => {
     // *too-flat* tail at >=200 words is where the signal lives — too
     // FEW unique words for the length). This is the simplest of the
     // four stylometric signals identified in the May 2026 detection-
-    // research review (docs/competitive/detection-research.md): no
-    // POS tagger required, no model, pure JS.
+    // research review: no POS tagger required, no model, pure JS.
     //
     // Threshold tuning: flag only when the sample is large enough
     // that low TTR is meaningfully suspicious (>=200 tokens) AND TTR
     // is below 0.40 (very vocabulary-poor). Conservative on purpose;
     // false positives on short or topic-narrow human prose are easy
     // to trigger and would drown out other signals. The detector-
-    // research lens flagged TTR as one of four stylometric add-ons;
-    // POS-bigram log-odds, function-word z-scores, and sentence-
-    // length burstiness are still TODO.
+    // research lens flagged TTR as one of four stylometric add-ons.
+    // One of the other three has since shipped in approximated form:
+    // `cross-para-burstiness` covers sentence-length burstiness across
+    // paragraphs. `fnword-trigram-entropy` is a related tagger-free
+    // signal (it approximates POS-trigram entropy, not one of the
+    // three). POS-bigram log-odds and function-word z-scores are
+    // still TODO.
     if (tokens.length >= 200) {
       const unique = new Set(tokens).size;
       const ttr = unique / tokens.length;
@@ -2432,7 +2472,20 @@ const AIDetector = (() => {
     // above a list of two items. Now the dedup runs first, then each
     // distinct issue contributes its category weight — so the number
     // reflects the same signals the user actually sees.
-    const deduped = deduplicateIssues(issues);
+    // The staged-discovery phrase can contain the older "the most interesting
+    // part" flatline match or sentence-initial "Turns out". Report the
+    // enclosing signal once while leaving unrelated findings intact.
+    const stagedDiscoverySpans = stagedDiscoveryIssues
+      .map((issue) => ({ start: issue.index, end: issue.index + issue.text.length }));
+    const nonOverlappingIssues = issues.filter((issue) =>
+      (issue.type !== 'emotional-flatline' && issue.type !== 'performed-insight') ||
+      stagedDiscoveryIssues.includes(issue) ||
+      !Number.isInteger(issue.index) ||
+      !stagedDiscoverySpans.some((span) =>
+        issue.index >= span.start && issue.index + issue.text.length <= span.end
+      )
+    );
+    const deduped = deduplicateIssues(nonOverlappingIssues);
     for (const issue of deduped) {
       rawScore += ISSUE_WEIGHTS[issue.type] ?? 2;
     }
@@ -2742,8 +2795,9 @@ const AIDetector = (() => {
     // floor of 'medium' in that case (an adversary actively evading
     // detection should never read as low-confidence noise).
 
-    // Soft probability distribution. Not calibrated against a labeled
-    // corpus yet (TODO when corpus exists — see roadmap.md). Largest
+    // Soft probability distribution. Hand-tuned, not calibrated
+    // against the labeled corpora the repo now samples
+    // (`scripts/dataset-hc3.js`, `scripts/dataset-raid.js`). Largest
     // class is computed as `1 - others` after rounding to guarantee
     // sum=1 exactly. Sub-1% drift would otherwise hide in toFixed.
     const aiSoft = Math.min(0.97, score / 100 + totalCorrob * 0.06 + strongCorrob * 0.08);

@@ -59,6 +59,24 @@ assert.strictEqual(oversized.status, 2, oversized.stderr);
 assert.match(oversized.stderr, /detector limit exceeded/);
 assert.doesNotMatch(oversized.stdout, /^PASS /m);
 
+// An unsegmented-script document (Chinese/Japanese: no inter-word spaces) is
+// declined, not scored; the gate must exit 2 rather than pass silently (#241).
+const cjk = path.join(tmp, "cjk.md");
+fs.writeFileSync(cjk, "这个函数返回一个承诺，调用方不应假设句柄之后仍可重用。".repeat(50), "utf8");
+const cjkRun = run([cjk]);
+assert.strictEqual(cjkRun.status, 2, cjkRun.stderr);
+assert.match(cjkRun.stderr, /unsegmented-script document/);
+assert.doesNotMatch(cjkRun.stdout, /^PASS /m);
+
+// A short English document with an incidental CJK place name is not an
+// unsegmented-script document: the dominance check keeps it scorable, so
+// the gate must not exit 2 on it (#241 review follow-up).
+const mixed = path.join(tmp, "mixed.md");
+fs.writeFileSync(mixed, "The Tokyo (東京) office owns the retry limit docs.", "utf8");
+const mixedRun = run([mixed]);
+assert.notStrictEqual(mixedRun.status, 2, mixedRun.stderr);
+assert.doesNotMatch(mixedRun.stderr, /cannot scan/);
+
 const gitRepo = path.join(tmp, "repo");
 fs.mkdirSync(gitRepo);
 spawnSync("git", ["init", "-q"], { cwd: gitRepo });
@@ -169,6 +187,22 @@ assert.strictEqual(customData.threshold, 2);
 assert.strictEqual(customData.context, "general");
 assert.strictEqual(customData.sourceMode, "plain");
 
+// An operational error must leave stdout empty under --json, even when earlier
+// files scanned cleanly: the Action parses stdout only on exit 0/1 and documents
+// total-findings / failed-files as unset on exit 2.
+const jsonErrors = [
+  [["--json", clean, tooLong], /detector limit exceeded/],
+  [["--json", clean, cjk], /unsegmented-script document/],
+  [["--json", clean, path.join(tmp, "missing.md")], /cannot read/],
+  [["--json", "--threshold", "1.5", clean], /invalid --threshold/],
+];
+for (const [args, stderrPattern] of jsonErrors) {
+  const errored = run(args);
+  assert.strictEqual(errored.status, 2, errored.stderr);
+  assert.strictEqual(errored.stdout, "", `--json wrote stdout on an operational error: ${args.join(" ")}`);
+  assert.match(errored.stderr, stderrPattern);
+}
+
 const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
 assert.match(action, /trap 'rm -f "\$TMP_JSON"' EXIT/);
 assert.match(action, /EXIT_CODE=2/);
@@ -176,6 +210,49 @@ assert.match(action, /could not create a temporary output file/);
 assert.match(action, /could not initialize action outputs/);
 assert.match(action, /gate process exited unexpectedly with status \$EXIT_CODE/);
 assert.match(action, /unset when the scan exits with an operational error/g);
+
+// Execute the Action's embedded output writer against real gate JSON instead of
+// only matching action.yml as text. The script sits in a bash single-quoted
+// string, so the text between `node -e '` and `' "$TMP_JSON"` is the program.
+const writerMatch = action.match(/node -e '\r?\n([\s\S]*?)\r?\n\s*' "\$TMP_JSON"/);
+assert.ok(writerMatch, "action.yml output writer not found");
+assert.doesNotMatch(writerMatch[1], /'/, "a single quote would end the bash string early");
+function runWriter(gateStdout) {
+  const jsonFile = path.join(tmp, "gate.json");
+  const outputFile = path.join(tmp, "github-output");
+  fs.writeFileSync(jsonFile, gateStdout, "utf8");
+  fs.writeFileSync(outputFile, "pass=false\n", "utf8");
+  const child = spawnSync(process.execPath, ["-e", writerMatch[1], jsonFile], {
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_OUTPUT: outputFile },
+  });
+  return { child, outputs: fs.readFileSync(outputFile, "utf8") };
+}
+
+const writerFailing = runWriter(jsonMixed.stdout);
+assert.strictEqual(writerFailing.child.status, 0, writerFailing.child.stderr);
+assert.strictEqual(
+  writerFailing.outputs,
+  `pass=false\npass=false\ntotal-findings=${mixedData.totalFindings}\nfailed-files=1\n`
+);
+assert.match(writerFailing.child.stdout, /^PASS .*clean\.md — 0 finding\(s\), threshold 0$/m);
+assert.match(writerFailing.child.stdout, /^FAIL .*flagged\.md — \d+ finding\(s\), threshold 0 \[/m);
+
+// GitHub resolves a repeated key to its last value, so the initial pass=false
+// is overridden on a passing scan.
+const writerPassing = runWriter(jsonPassing.stdout);
+assert.strictEqual(writerPassing.child.status, 0, writerPassing.child.stderr);
+assert.strictEqual(writerPassing.outputs, "pass=false\npass=true\ntotal-findings=0\nfailed-files=0\n");
+
+const writerEmpty = runWriter(jsonEmpty.stdout);
+assert.strictEqual(writerEmpty.child.status, 0, writerEmpty.child.stderr);
+assert.match(writerEmpty.child.stdout, /no matching files; nothing to scan/);
+
+// Truncated JSON must fail the writer so the Action reports exit 2 and leaves
+// pass=false in place.
+const writerBroken = runWriter(jsonMixed.stdout.slice(0, 40));
+assert.notStrictEqual(writerBroken.child.status, 0);
+assert.strictEqual(writerBroken.outputs, "pass=false\n");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("avoid-ai-writing gate cli: ok");

@@ -3,7 +3,9 @@
  *
  * Node-runnable smoke tests for the detection engine. Intentionally small and
  * dependency-free so they run on any `node >= 18` without installing
- * anything. Invoked via `npm run test:detector` and in CI.
+ * anything. Run by `npm test`, by `node scripts/run-tests.js
+ * detector/patterns.test.js` for this suite alone, or directly as
+ * `node detector/patterns.test.js`. CI runs `npm test`.
  *
  * Failure modes worth catching:
  *   - AI-heavy text scoring as human (regression in pattern coverage)
@@ -26,6 +28,33 @@ function test(name, fn) {
     console.error(`  ✗ ${name}`);
     console.error(`    ${err.message}`);
   }
+}
+
+/**
+ * Time `build(n)` at `base` and at 4x `base` (#208).
+ *
+ * Returns the best-of-three totals for an identical batch of scans at each
+ * size, so the assertion compares how the work scales rather than how fast the
+ * machine is. The batch is sized from the base input to lift both totals clear
+ * of timer noise; clamping the small total instead — as an earlier revision
+ * did — turns the ratio into a fixed millisecond allowance, and a quadratic
+ * regression then passes whenever the machine is fast enough to stay under it.
+ */
+function timeScaling(build, base, options) {
+  const measure = (n, batch) => {
+    const text = build(n);
+    let best = Infinity;
+    for (let run = 0; run < 3; run += 1) {
+      const started = performance.now();
+      for (let i = 0; i < batch; i += 1) AIDetector.analyzeText(text, options);
+      best = Math.min(best, performance.now() - started);
+    }
+    return best;
+  };
+
+  const single = Math.max(measure(base, 1), 0.05);
+  const batch = Math.min(2000, Math.max(1, Math.ceil(20 / single)));
+  return { small: measure(base, batch), large: measure(base * 4, batch), batch };
 }
 
 console.log('Detector fixtures');
@@ -382,35 +411,44 @@ test('#123: unknown source modes fall back visibly to plain', () => {
 });
 
 test('#190: many HTML comments avoid quadratic rescanning', () => {
-  const count = 2000;
+  // Ratio, not budget (#208): a linear masker takes about 4x longer on 4x the
+  // comments, while the per-comment full rescan this test exists to catch takes
+  // about 13x. An absolute millisecond budget measured the runner's load
+  // instead of the masker's complexity, so it failed on slow machines.
+  const count = 4000;
   // Every comment contains the unmatched backtick that forced the old
   // implementation to rebuild whole-document code masks per comment.
-  const text = `${'<!-- ` -->\n'.repeat(count)}one two three four five six seven eight nine ten`;
-  const started = performance.now();
-  const result = AIDetector.analyzeText(text, { sourceMode: 'rendered-markdown' });
-  const elapsedMs = performance.now() - started;
+  const build = (comments) =>
+    `${'<!-- ` -->\n'.repeat(comments)}one two three four five six seven eight nine ten`;
 
+  const result = AIDetector.analyzeText(build(count), { sourceMode: 'rendered-markdown' });
   assert.equal(result.stats.maskedHtmlComments, count);
+
+  const { small, large } = timeScaling(build, count / 4, { sourceMode: 'rendered-markdown' });
   assert.ok(
-    elapsedMs < 900,
-    `masking must not rescan the full document per comment (${elapsedMs.toFixed(1)}ms for ${count} comments)`,
+    large < small * 8,
+    `masking must not rescan the full document per comment: 4x comments took ${(large / small).toFixed(1)}x time (${small.toFixed(1)}ms vs ${large.toFixed(1)}ms)`,
   );
 });
 
 test('adversarial Markdown scans stay within a bounded time', () => {
   const ordinary = 'one two three four five six seven eight nine ten';
+  // Ratio, not budget (#208): every attack is measured at its base size and
+  // at 4x, so the assertion is about how the scan scales rather than about
+  // how loaded the runner happens to be.
   const attacks = [
-    `${ordinary} ${'`'.repeat(2500)}${'a'.repeat(2500)}`,
-    `${ordinary} ${'<a'.repeat(10000)}`,
-    `## 1.1.1${'\t'.repeat(20000)}— x\n${ordinary}`,
-    `## 1.1.${'1'.repeat(64000)}]x — 2026-01-01\n${ordinary}`,
-    `- ${' '.repeat(10000)}X\rY\n${ordinary}`,
+    ['unclosed code span', (n) => `${ordinary} ${'`'.repeat(n)}${'a'.repeat(n)}`, 2500],
+    ['unclosed anchor', (n) => `${ordinary} ${'<a'.repeat(n)}`, 10000],
+    ['heading tab run', (n) => `## 1.1.1${'\t'.repeat(n)}— x\n${ordinary}`, 20000],
+    ['long version digits', (n) => `## 1.1.${'1'.repeat(n)}]x — 2026-01-01\n${ordinary}`, 64000],
+    ['indented block run', (n) => `- ${' '.repeat(n)}X\rY\n${ordinary}`, 10000],
   ];
-  for (const text of attacks) {
-    const started = performance.now();
-    AIDetector.analyzeText(text);
-    const elapsedMs = performance.now() - started;
-    assert.ok(elapsedMs < 900, `adversarial scan took ${elapsedMs.toFixed(1)}ms`);
+  for (const [name, build, base] of attacks) {
+    const { small, large } = timeScaling(build, base);
+    assert.ok(
+      large < small * 8,
+      `${name}: 4x input took ${(large / small).toFixed(1)}x time (${small.toFixed(1)}ms vs ${large.toFixed(1)}ms)`,
+    );
   }
 });
 
@@ -936,16 +974,17 @@ test('#107: frontmatter, YAML, Markdown tables, and HTML attributes stay protect
 });
 
 test('#107: adversarial filename masking remains within a linear-time budget', () => {
+  const prefix = 'The generated identifier below has no filename extension and must remain safe to scan.';
   const attacks = [
-    `${'a-'.repeat(3000)}a`,
-    `${'segment/'.repeat(1000)}`,
+    ['hyphen run', (n) => `${prefix} ${'a-'.repeat(n)}a`, 750],
+    ['path segments', (n) => `${prefix} ${'segment/'.repeat(n)}`, 1000],
   ];
-  for (const attack of attacks) {
-    const text = `The generated identifier below has no filename extension and must remain safe to scan. ${attack}`;
-    const started = performance.now();
-    AIDetector.analyzeText(text);
-    const elapsedMs = performance.now() - started;
-    assert.ok(elapsedMs < 1000, `adversarial mask scan took ${elapsedMs.toFixed(1)}ms`);
+  for (const [name, build, base] of attacks) {
+    const { small, large } = timeScaling(build, base);
+    assert.ok(
+      large < small * 8,
+      `${name}: 4x input took ${(large / small).toFixed(1)}x time (${small.toFixed(1)}ms vs ${large.toFixed(1)}ms)`,
+    );
   }
 });
 
@@ -1244,8 +1283,7 @@ test('hashtag-stuff still fires on tags spread inline through a post', () => {
 test('low-ttr fires on a 200+ token text with narrow vocabulary', () => {
   // Vocabulary-poor synthetic sample: same 11-word sentence repeated.
   // ~200 tokens, ~11 unique = ~5% TTR. Well under the 40% threshold.
-  // Stylometric signal from the May 2026 detection-research review
-  // (docs/competitive/detection-research.md).
+  // Stylometric signal from the May 2026 detection-research review.
   const sentence = 'The system shows the system improves the system every iteration. ';
   const text = sentence.repeat(20);
   const r = AIDetector.analyzeText(text);
@@ -2241,6 +2279,50 @@ test('performed-insight: essayist tics fire', () => {
   assert.ok(hits.length >= 3, `expected >=3 performed-insight hits, got ${JSON.stringify(hits)}`);
 });
 
+test('performed-insight: staged discovery fires once per phrase', () => {
+  const r = AIDetector.analyzeText(
+    "I have the device on my desk, and the recording turned out to be the least interesting part. The real story was the queue of work it created."
+  );
+  const hits = r.issues.filter((i) => i.type === 'performed-insight').map((i) => i.text.toLowerCase());
+  assert.deepEqual(hits, ['turned out to be the least interesting part', 'the real story was']);
+});
+
+test('performed-insight: sentence-initial Turns out is subsumed by staged discovery', () => {
+  const r = AIDetector.analyzeText(
+    'Turns out to be the most interesting part was the detour, according to the post.'
+  );
+  const hits = r.issues.filter((i) => i.type === 'performed-insight').map((i) => i.text.toLowerCase());
+  assert.deepEqual(hits, ['turns out to be the most interesting part']);
+});
+
+test('performed-insight: nested emotional flatline counts once', () => {
+  const r = AIDetector.analyzeText(
+    'The recording turned out to be the most interesting part. The most interesting thing was the battery life.'
+  );
+  const performed = r.issues.filter((i) => i.type === 'performed-insight');
+  const flatline = r.issues.filter((i) => i.type === 'emotional-flatline');
+  assert.deepEqual(performed.map((i) => i.text.toLowerCase()), ['turned out to be the most interesting part']);
+  assert.deepEqual(flatline.map((i) => i.text.toLowerCase()), ['the most interesting thing']);
+  assert.equal(r.stats.patternCount, r.issues.length);
+});
+
+test('performed-insight: older phrases preserve their nested flatline finding', () => {
+  const r = AIDetector.analyzeText(
+    'That is why the most interesting part mattered to the team during the launch.'
+  );
+  const types = r.issues.map((i) => i.type);
+  assert.ok(types.includes('performed-insight'));
+  assert.ok(types.includes('emotional-flatline'));
+});
+
+test('performed-insight: literal turned-out and story uses stay clean', () => {
+  const r = AIDetector.analyzeText(
+    "The cheaper vendor turned out to be the most expensive option once support was priced in. The real story was covered by two local papers, and the real estate market cooled that spring."
+  );
+  const hits = r.issues.filter((i) => i.type === 'performed-insight');
+  assert.equal(hits.length, 0, `false positives: ${JSON.stringify(hits.map((i) => i.text))}`);
+});
+
 test('performed-insight: ordinary uses do not fire', () => {
   const r = AIDetector.analyzeText(
     "She sat with him through the appointment and the long drive home afterward. The whole family gathered for the reunion photos on Saturday. Naming names in the report was the part of the job he liked least of all."
@@ -2528,13 +2610,17 @@ test('#189: direct normalization handles every occurrence and mapped analysis st
   assert.equal(normalized.text, 'xyz ex ey');
   assert.deepEqual(normalized.flags, { zeroWidth: 2, homoglyph: 2, roleplay: 0 });
 
-  const dense = '\u200b'.repeat(75000)
+  const denseCount = 75000;
+  const buildDense = (n) => '\u200b'.repeat(n)
     + 'Alpha beta gamma delta epsilon zeta eta theta iota kappa only time will tell about systems.';
-  const started = Date.now();
-  const denseResult = AIDetector.analyzeText(dense);
-  const elapsed = Date.now() - started;
-  assert.equal(denseResult.stats.normalization.zeroWidth, 75000);
-  assert.ok(elapsed < 1000, `dense mapped analysis took ${elapsed}ms; expected a linear pass under 1000ms`);
+  const denseResult = AIDetector.analyzeText(buildDense(denseCount));
+  assert.equal(denseResult.stats.normalization.zeroWidth, denseCount);
+
+  const { small, large } = timeScaling(buildDense, denseCount);
+  assert.ok(
+    large < small * 8,
+    `dense mapped analysis: 4x zero-width characters took ${(large / small).toFixed(1)}x time (${small.toFixed(1)}ms vs ${large.toFixed(1)}ms)`,
+  );
 });
 
 test('#189: ordinary unchanged text reports native indexes and exact slices', () => {
@@ -2741,6 +2827,202 @@ test('reply openers and analytical framing are not reported as acknowledgment lo
       assert.ok(!r.issues.some((i) => i.type === 'acknowledgment-loop'));
     }
   }
+});
+
+test('#241: unsegmented-script documents are declined, not scored "Too short"', () => {
+  // countWords counts \S+ runs; Chinese and Japanese carry no inter-word
+  // spaces, so segmentation cannot measure them. The script check runs
+  // before the word gate and declines only when CJK characters dominate
+  // the non-whitespace text. Han + kana ranges (including halfwidth
+  // katakana) signal an unsegmented script; Hangul is space-separated and
+  // segments fine, so it is excluded.
+  const zh = '这个函数返回一个承诺，调用方不应假设句柄之后仍可重用。'.repeat(50);
+  const rzh = AIDetector.analyzeText(zh);
+  assert.equal(rzh.label, 'Unsupported script', `expected Unsupported script, got ${rzh.label}`);
+  assert.equal(rzh.unsupportedScript, true);
+  assert.equal(rzh.document_classification, 'UNSCORED');
+  assert.ok(rzh.stats.cjkChars > 0, 'stats must carry the cjkChars count');
+  assert.match(rzh.stats.reason, /unsegmented-script/);
+
+  const ja = 'この関数はプロミスを返します。呼び出し側は、ハンドルがその後も再利用できると仮定してはいけません。'.repeat(40);
+  assert.equal(AIDetector.analyzeText(ja).label, 'Unsupported script');
+
+  // Halfwidth katakana (U+FF66–U+FF9D) is also an unsegmented script.
+  const jaHw = 'ﾃｽﾄ'.repeat(100);
+  assert.equal(AIDetector.analyzeText(jaHw).label, 'Unsupported script');
+
+  // Supplementary-plane Han and kana must be counted by code point. Explicit
+  // BMP ranges miss these characters and a non-Unicode regex counts each
+  // surrogate pair twice in the dominance denominator.
+  const zhSupplementary = '𠀀'.repeat(100); // CJK Unified Ideographs Extension B
+  const rzhSupplementary = AIDetector.analyzeText(zhSupplementary);
+  assert.equal(rzhSupplementary.label, 'Unsupported script');
+  assert.equal(rzhSupplementary.stats.cjkChars, 100);
+  const jaSupplementary = '𛀀'.repeat(100); // Kana Supplement
+  assert.equal(AIDetector.analyzeText(jaSupplementary).label, 'Unsupported script');
+
+  // Newline-wrapped CJK lines each count as a word, so the script check
+  // must not sit inside the minimum word-count condition.
+  const zhLines = Array(10).fill('这个函数返回一个承诺。').join('\n');
+  assert.equal(AIDetector.analyzeText(zhLines).label, 'Unsupported script');
+
+  // A genuinely short English document still reports Too short.
+  const en = AIDetector.analyzeText('Short text here.');
+  assert.equal(en.label, 'Too short');
+  assert.equal(en.unsupportedScript, undefined);
+
+  // An incidental CJK place name in a short English document is not an
+  // unsegmented-script document: the dominance check keeps it scorable.
+  const mixed = AIDetector.analyzeText('The Tokyo (東京) office owns the retry limit docs.');
+  assert.equal(mixed.label, 'Too short');
+  assert.equal(mixed.unsupportedScript, undefined);
+
+  // Korean is space-separated: it segments and scores normally.
+  const ko = '이 함수는 프라미스를 반환합니다. 호출자는 핸들이 나중에 재사용 가능하다고 가정해서는 안 됩니다. '.repeat(30);
+  const rko = AIDetector.analyzeText(ko);
+  assert.notEqual(rko.label, 'Unsupported script');
+  assert.equal(rko.unsupportedScript, undefined);
+});
+
+// #242: pin the stylometric signals independently of aggregate score, which
+// can stay green when another detector happens to fire on the same document.
+test('uniformity: five equal long sentences fire, varied rhythm stays clean', () => {
+  const sentence = 'The worker reads every queued message before it writes the result to disk.';
+  const issues = AIDetector.analyzeText(Array(5).fill(sentence).join(' ')).issues
+    .filter(i => i.type === 'uniformity');
+  assert.deepEqual(issues.map(i => i.text), [
+    'Sentence lengths cluster around 13 words (low variation)',
+  ]);
+  assert.equal(issues[0].severity, 'medium');
+
+  const varied = [
+    'Stop.', sentence, 'We waited for the retry.',
+    'After the connection closed, Mara checked the logs, restored the backup, and reran the batch with a smaller request limit.',
+    'It worked.',
+  ].join(' ');
+  assert.equal(AIDetector.analyzeText(varied).issues.filter(i => i.type === 'uniformity').length, 0);
+  assert.equal(AIDetector.analyzeText(Array(4).fill(sentence).join(' ')).issues
+    .filter(i => i.type === 'uniformity').length, 0, 'four sentences are below the sample gate');
+});
+
+test('uniformity: sentence-length spread pins the 0.25 variation threshold', () => {
+  // Identical sentences sit at CV 0, so they cannot tell 0.25 from 0.01.
+  // These bracket the threshold: 9/12/14/16/19 words is CV 0.243 and fires;
+  // widening the ends to 8 and 20 words is CV 0.286 and stays clean.
+  const middle = [
+    'The queue had cleared by noon, so we closed the incident early.',
+    'After the connection dropped, the worker retried twice before it finally gave up completely.',
+    'We restored the backup from Tuesday and reran the batch with a smaller request limit overnight.',
+  ];
+  const nearThreshold = [
+    'Mara checked the logs and found nothing unusual there.',
+    ...middle,
+    'Nobody could explain why the second worker still held the lock after the scheduler had already marked it done.',
+  ].join(' ');
+  const issues = AIDetector.analyzeText(nearThreshold).issues.filter(i => i.type === 'uniformity');
+  assert.deepEqual(issues.map(i => i.text), [
+    'Sentence lengths cluster around 14 words (low variation)',
+  ]);
+
+  const justOver = [
+    'Mara checked the logs and found nothing unusual.',
+    ...middle,
+    'Nobody could explain why the second worker still held the lock after the scheduler had already marked it as done.',
+  ].join(' ');
+  assert.equal(AIDetector.analyzeText(justOver).issues.filter(i => i.type === 'uniformity').length, 0,
+    'CV 0.286 must sit above the threshold');
+});
+
+test('uniformity: equal paragraph sizes fire, varied paragraph sizes stay clean', () => {
+  const paragraph = 'Mara checked the logs. The queue had cleared. We closed the incident.';
+  const issues = AIDetector.analyzeText(Array(4).fill(paragraph).join('\n\n')).issues
+    .filter(i => i.type === 'uniformity');
+  assert.deepEqual(issues.map(i => i.text), ['All paragraphs are ~3 sentences']);
+  assert.equal(issues[0].severity, 'low');
+
+  const varied = [
+    'Mara checked the logs.',
+    'The queue had cleared. We closed the incident.',
+    paragraph,
+    'One task failed. ' + paragraph + ' The workers stopped.',
+  ].join('\n\n');
+  assert.equal(AIDetector.analyzeText(varied).issues.filter(i => i.type === 'uniformity').length, 0);
+  assert.equal(AIDetector.analyzeText(Array(3).fill(paragraph).join('\n\n')).issues
+    .filter(i => i.type === 'uniformity').length, 0, 'three paragraphs are below the sample gate');
+});
+
+test('formatting: four bold spans fire, three ordinary emphases stay clean', () => {
+  const clauses = [
+    'Read the **log** before you change the limit.',
+    'Check the **queue** when the worker stops.',
+    'Keep a **backup** until the migration finishes.',
+    'Use the **timestamp** to find the failed request.',
+  ];
+  const issues = AIDetector.analyzeText(clauses.join(' ')).issues.filter(i => i.type === 'formatting');
+  assert.deepEqual(issues.map(i => i.text), ['4 bold phrases']);
+  assert.equal(AIDetector.analyzeText(clauses.slice(0, 3).join(' ')).issues
+    .filter(i => i.type === 'formatting').length, 0);
+});
+
+test('confidence-calibration: three raw matches fire, two stay clean', () => {
+  const clauses = [
+    'Interestingly, the retry completed after the connection reopened.',
+    'Surprisingly, the old worker still held the lock.',
+    'Importantly, no messages were lost during the restart.',
+  ];
+  const issues = AIDetector.analyzeText(clauses.join(' ')).issues
+    .filter(i => i.type === 'confidence-calibration');
+  assert.deepEqual(issues.map(i => i.text.toLowerCase()).sort(), [
+    'importantly', 'interestingly', 'surprisingly',
+  ]);
+  assert.equal(AIDetector.analyzeText(clauses.slice(0, 2).join(' ')).issues
+    .filter(i => i.type === 'confidence-calibration').length, 0);
+});
+
+test('confidence-calibration: repeated wording satisfies the pre-dedup gate', () => {
+  const sentence = 'Interestingly, the retry completed after the connection reopened.';
+  const issues = AIDetector.analyzeText(Array(3).fill(sentence).join(' ')).issues
+    .filter(i => i.type === 'confidence-calibration');
+  assert.equal(issues.length, 1, 'three raw matches become one displayed finding');
+  assert.equal(issues[0].text.toLowerCase(), 'interestingly');
+  assert.equal(AIDetector.analyzeText(Array(2).fill(sentence).join(' ')).issues
+    .filter(i => i.type === 'confidence-calibration').length, 0);
+});
+
+test('fnword-trigram-entropy: low entropy fires, varied grammar stays clean', () => {
+  const repeated = 'the and of '.repeat(50) + 'I can send it if you want to see what she has written.';
+  const issues = AIDetector.analyzeText(repeated).issues
+    .filter(i => i.type === 'fnword-trigram-entropy');
+  assert.equal(issues.length, 1);
+  assert.match(issues[0].text, /^Function-word trigram entropy .* \(low\)$/);
+  assert.equal(issues[0].severity, 'medium');
+
+  const varied = [
+    'Mara checked the logs before lunch and found no failed requests.',
+    'If you can reproduce this locally, send us the input and the timestamp.',
+    'She had already read our notes when the second worker stopped.',
+    'We will use the old queue until they tell us why their patch failed.',
+    'It was a small change, but he could not deploy it without a review.',
+    'The scheduler should wait for a response rather than assume that the task is done.',
+    'I have kept your backup here so that you can restore it when needed.',
+    'Those jobs were started by another process which has since exited.',
+    'Do not remove this check because it catches a failure we have seen before.',
+    'What happens after a timeout depends on whether there is room in the queue.',
+    'They may retry from the saved cursor or ask for a new snapshot.',
+    'Our test writes a file to disk and then reads its contents back.',
+  ].join(' ');
+  const clean = AIDetector.analyzeText(varied);
+  assert.ok(clean.stats.wordCount >= 150, 'negative control must reach the entropy gate');
+  assert.equal(clean.issues.filter(i => i.type === 'fnword-trigram-entropy').length, 0);
+});
+
+test('fnword-trigram-entropy: single trigram fires at 150 words, not 149', () => {
+  const issues = AIDetector.analyzeText('the '.repeat(150)).issues
+    .filter(i => i.type === 'fnword-trigram-entropy');
+  assert.deepEqual(issues.map(i => i.text), ['Single function-word trigram repeated across document']);
+  assert.equal(issues[0].severity, 'high');
+  assert.equal(AIDetector.analyzeText('the '.repeat(149)).issues
+    .filter(i => i.type === 'fnword-trigram-entropy').length, 0);
 });
 
 if (failed > 0) {
