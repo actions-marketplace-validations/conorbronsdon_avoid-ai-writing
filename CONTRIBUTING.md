@@ -36,6 +36,7 @@ newcomer PRs. Please leave `good first issue`s for new contributors.
 | `README.md` | The pitch and the numbered prose-pattern list. |
 | [`GLOSSARY.md`](GLOSSARY.md) | One-line definitions of the project's terms, each linked to its canonical source. |
 | `cursor-rules/`, `plugins/` | Editor and tool integrations. |
+| `skills/` | The seven ChatGPT/Codex Skills and their validated connection graph. See [`OPENAI_PLUGIN.md`](OPENAI_PLUGIN.md); changes to `SKILL.md` modes or output can break them. |
 
 ## Adding or changing a rule
 
@@ -74,6 +75,19 @@ derives the new total and compares it to two literals:
 `scripts/check-pattern-count.sh` enforces both on every PR. Adding a word-table
 row instead only requires bumping the separate `**NN-entry word replacement
 table**` README bullet (same script).
+
+## Editorial decision-card pilot
+
+Selected catalog entries have an `ec-` rule ID, a partial detector mapping,
+applicability conditions, and edit/keep/gap examples. Preserve those IDs and
+existing section anchors when refining a card. Keep its source exceptions and
+attribution; do not infer semantic equivalence from a detector mapping.
+
+For a card change, include a justified edit and a contrasting must-preserve
+case. Check scope, source uncertainty, authentic voice, protected content, and
+missing information. Evaluate the delivered rewrite and any retained gap;
+matching a preferred sentence or reducing a detector score is not the goal.
+The pilot does not require converting the whole catalog or adding a rule DSL.
 
 ## Precision over recall
 
@@ -125,6 +139,18 @@ The rules from the [#88 license audit](https://github.com/conorbronsdon/avoid-ai
 - **This repo bundles no style guide it cannot verify the license for.** The `--style` layer is config-driven; users supply their own conventions.
 - **Openly-licensed guides may ship later as example configs** (Google, Microsoft, GOV.UK, and 18F qualify), using Vale's attribution pattern: disclaim endorsement, name the license, link the guide upstream.
 - **Paywalled guides (CMOS, APA, MLA, AP) are never shipped, in any form, under any name.** Passing one to `--style` falls through to the fallback that claims no compliance. The reason is trademark and verifiability, not maintenance burden.
+
+## Development setup
+
+Fork the repository and clone your fork. The Node minimum is `engines.node` in
+`package.json`. The sync scripts also need Bash and Python 3. After editing
+`SKILL.md` or `references/patterns.md`, regenerate the copies:
+
+```bash
+bash scripts/sync-plugin-skill.sh && bash scripts/sync-cursor-rules.sh
+```
+
+The next section covers running the full suite and a single test file.
 
 ## Run the tests
 
@@ -191,6 +217,9 @@ lead with the directive — match the length and tone of the bullets already in
 `SKILL.md`. Drop intensifiers like "strong" or "powerful"; let the rule stand on
 its own.
 
+Quote or backtick example vocabulary in changelog entries and docs; the self-scan
+exempts quoted spans, inline code, code blocks, tables, and blockquotes.
+
 ## Changelog and versioning
 
 Add an entry under `## [Unreleased]` in `CHANGELOG.md` when a change affects
@@ -205,11 +234,34 @@ supported.
 
 When preparing a release, move its Unreleased entries under a dated, versioned
 heading (`## [X.Y.Z] — YYYY-MM-DD`) and update the matching versions in
-`SKILL.md`, `package.json`, and both plugin manifests. A release that adds a
-writing rule needs a minor version bump. Exempt changes need no version bump;
-leave published release entries intact.
+`SKILL.md`, `package.json`, both plugin manifests, and the six hand-written
+Skill frontmatters under `skills/` (every `skills/*/SKILL.md` except the
+generated `skills/avoid-ai-writing/SKILL.md`). A release that adds a writing
+rule needs a minor version bump. Exempt changes need no version bump; leave published
+release entries intact.
 
 After changing either canonical file, run `bash scripts/sync-plugin-skill.sh && bash scripts/sync-cursor-rules.sh`. This regenerates both bundles, `SKILL.full.md`, and the portable paste/Cursor artifacts; CI checks parity. Do not edit generated copies.
 
 Maintainers should follow [the release recovery procedure](docs/releasing.md)
 instead of moving a tag or reusing a published version after a failed run.
+
+## Release checklist
+
+The release workflow publishes when a version change reaches `main`, so merge
+the version bump only when the release is ready.
+
+1. Move the `## [Unreleased]` entries under a dated, versioned heading
+   (`## [X.Y.Z] — YYYY-MM-DD`). A release that adds a writing rule needs a
+   minor version bump.
+2. Set the same version in the `SKILL.md` frontmatter, `package.json`,
+   `plugins/avoid-ai-writing/.claude-plugin/plugin.json`,
+   `.codex-plugin/plugin.json`, and the `version:` line of the six
+   hand-written `skills/*/SKILL.md` files. The sync scripts do not write these
+   versions; `scripts/validate-openai-plugin.py` fails when a Skill's version
+   differs from the OpenAI manifest.
+3. Run `bash scripts/sync-plugin-skill.sh && bash scripts/sync-cursor-rules.sh`.
+   The first script fails when a manifest or `package.json` version differs
+   from `SKILL.md`.
+4. Run `npm test` and `python3 scripts/validate-openai-plugin.py . --json`.
+
+If a release run fails, follow [the release recovery procedure](docs/releasing.md).
